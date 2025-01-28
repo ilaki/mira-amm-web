@@ -133,11 +133,11 @@ const Swap = () => {
   }, [isConnected]);
 
   const sellBalance = balances?.find(
-    (b) => b.assetId === swapState.sell.assetId
+    (b) => b.assetId === swapState.sell.assetId,
   )?.amount;
   const sellBalanceValue = sellBalance ?? new BN(0);
   const buyBalance = balances?.find(
-    (b) => b.assetId === swapState.buy.assetId
+    (b) => b.assetId === swapState.buy.assetId,
   )?.amount;
   const buyBalanceValue = buyBalance ?? new BN(0);
 
@@ -247,7 +247,7 @@ const Swap = () => {
       swapAssets,
       swapState.buy.assetId,
       swapState.sell.assetId,
-    ]
+    ],
   );
 
   const debouncedSetState = useDebounceCallback(setSwapState, 500);
@@ -294,10 +294,14 @@ const Swap = () => {
             amount,
           },
         }));
-        setActiveMode(mode);
+
+        if (mode !== activeMode) {
+          setActiveMode(mode);
+          previousPreviewValue.current = "";
+        }
       };
     },
-    [debouncedSetState]
+    [debouncedSetState, activeMode],
   );
 
   const handleCoinSelectorClick = useCallback(
@@ -305,7 +309,7 @@ const Swap = () => {
       openCoinsModal();
       modeForCoinSelector.current = mode;
     },
-    [openCoinsModal]
+    [openCoinsModal],
   );
 
   const handleCoinSelection = (assetId: string | null) => {
@@ -341,28 +345,7 @@ const Swap = () => {
   const amountMissing =
     swapState.buy.amount === "" || swapState.sell.amount === "";
   const sufficientEthBalance = useCheckEthBalance(swapState.sell);
-
-  useEffect(() => {
-    if (!isValidNetwork) {
-      setSwapButtonTitle("Incorrect network");
-    } else if (swapPending) {
-      setSwapButtonTitle("Waiting for approval in wallet");
-    } else if (!sufficientEthBalance) {
-      setSwapButtonTitle("Bridge more ETH to pay for gas");
-    } else if (showInsufficientBalance) {
-      setSwapButtonTitle("Insufficient balance");
-    } else if (!review) {
-      setSwapButtonTitle("Review");
-    } else {
-      setSwapButtonTitle("Swap");
-    }
-  }, [
-    isValidNetwork,
-    showInsufficientBalance,
-    sufficientEthBalance,
-    swapPending,
-    review,
-  ]);
+  const exchangeRate = useExchangeRate(swapState);
 
   //Fetches cost during review button click
   const fetchCost = useCallback(async () => {
@@ -393,12 +376,13 @@ const Swap = () => {
     } else {
       if (!sufficientEthBalance) {
         openNewTab(
-          `${FuelAppUrl}/bridge?from=eth&to=fuel&auto_close=true&=true`
+          `${FuelAppUrl}/bridge?from=eth&to=fuel&auto_close=true&=true`,
         );
         return;
       }
 
-      if (amountMissing || swapPending) {
+      //If the selling amount is 0, the function does not work.
+      if (amountMissing || swapPending || exchangeRate === null) {
         return;
       }
       swapStateForPreview.current = swapState;
@@ -419,6 +403,7 @@ const Swap = () => {
           !e.message.includes("User canceled sending transaction")
         ) {
           openFailure();
+          setSwapButtonTitle("Swap");
         }
       }
     }
@@ -427,25 +412,41 @@ const Swap = () => {
     amountMissing,
     swapPending,
     swapState,
-    fetchTxCost,
     triggerSwap,
     openSuccess,
     openFailure,
     refetchBalances,
     swapButtonTitle,
     fetchCost,
+    txCostData?.tx,
+    exchangeRate,
   ]);
 
   useEffect(() => {
     try {
       const insufficientSellBalance = sellBalanceValue.lt(
-        bn.parseUnits(sellValue, sellMetadata.decimals || 0)
+        bn.parseUnits(sellValue, sellMetadata.decimals || 0),
       );
       setShowInsufficientBalance(
-        insufficientSellBalance && sufficientEthBalance
+        insufficientSellBalance && sufficientEthBalance,
       );
     } catch (e) {}
   }, [sellValue, sellMetadata, sufficientEthBalance, sellBalanceValue]);
+
+  const feePercent =
+    previewData?.pools.reduce((percent, pool) => {
+      const isStablePool = pool[2];
+      const poolPercent = isStablePool ? 0.05 : 0.3;
+
+      return percent + poolPercent;
+    }, 0) ?? 0;
+
+  const feeValue =
+    sellValue === ""
+      ? 0
+      : ((feePercent / 100) * parseFloat(sellValue)).toFixed(
+          sellMetadata.decimals || 0,
+        );
 
   const swapDisabled =
     !isValidNetwork ||
@@ -456,17 +457,32 @@ const Swap = () => {
     !buyValue ||
     previewLoading;
 
-  const exchangeRate = useExchangeRate(swapState);
-  const feePercent =
-    previewData?.pools.reduce((percent, pool) => {
-      const isStablePool = pool[2];
-      const poolPercent = isStablePool ? 0.05 : 0.3;
+  useEffect(() => {
+    if (!isValidNetwork) {
+      setSwapButtonTitle("Incorrect network");
+    } else if (swapPending) {
+      setSwapButtonTitle("Waiting for approval in wallet");
+    } else if (!sufficientEthBalance || showInsufficientBalance) {
+      setSwapButtonTitle("Insufficient balance");
+    } else if (!review && !amountMissing) {
+      setSwapButtonTitle("Review");
+    } else if (amountMissing) {
+      setSwapButtonTitle("Input amounts");
+    }
+  }, [
+    isValidNetwork,
+    showInsufficientBalance,
+    sufficientEthBalance,
+    swapPending,
+    review,
+    amountMissing,
+  ]);
 
-      return percent + poolPercent;
-    }, 0) ?? 0;
-  const feeValue = ((feePercent / 100) * parseFloat(sellValue)).toFixed(
-    sellMetadata.decimals || 0
-  );
+  useEffect(() => {
+    if (amountMissing) {
+      setReview(false);
+    }
+  }, [amountMissing]);
 
   const inputPreviewLoading = previewLoading && activeMode === "buy";
   const outputPreviewLoading = previewLoading && activeMode === "sell";
@@ -491,13 +507,26 @@ const Swap = () => {
   const sellAssetPrice = useAssetPrice(swapState.sell.assetId);
   const buyAssetPrice = useAssetPrice(swapState.buy.assetId);
 
+  const isActionDisabled =
+    swapDisabled &&
+    !previewLoading &&
+    !balancesPending &&
+    (txCostPending || amountMissing);
+
+  //If amount is missing txCostPending is irrelevant
+  //If in sufficient fund, previewLoading is irrelevant
+  const isActionLoading =
+    balancesPending ||
+    (previewLoading && swapButtonTitle !== "Insufficient balance") ||
+    (!amountMissing && txCostPending);
+
   return (
     <>
       <div className={styles.swapAndRate}>
         <div
           className={clsx(
             styles.swapContainer,
-            swapPending && styles.swapContainerLoading
+            swapPending && styles.swapContainerLoading,
           )}
         >
           <div className={styles.heading}>
@@ -544,14 +573,18 @@ const Swap = () => {
             <div className={styles.summary}>
               <div className={styles.summaryEntry}>
                 <p>Rate</p>
-                {previewLoading ? <Loader /> : <p>{exchangeRate}</p>}
+                {previewLoading ? (
+                  <Loader color="gray" />
+                ) : (
+                  <p>{exchangeRate}</p>
+                )}
               </div>
 
               <div className={styles.summaryEntry}>
                 <p>Order routing</p>
                 <div className={styles.feeLine}>
                   {previewLoading ? (
-                    <Loader />
+                    <Loader color="gray" />
                   ) : (
                     previewData?.pools.map((pool, index) => {
                       const poolKey = createPoolKey(pool);
@@ -570,7 +603,7 @@ const Swap = () => {
               <div className={styles.summaryEntry}>
                 <p>Estimated fees</p>
                 {previewLoading ? (
-                  <Loader />
+                  <Loader color="gray" />
                 ) : (
                   <p>
                     {feeValue} {sellMetadata.symbol}
@@ -580,8 +613,8 @@ const Swap = () => {
 
               <div className={styles.summaryEntry}>
                 <p>Network cost</p>
-                {previewLoading || txCostPending ? (
-                  <Loader />
+                {txCostPending ? (
+                  <Loader color="gray" />
                 ) : (
                   <p>{txCost?.toFixed(9)} ETH</p>
                 )}
@@ -601,9 +634,9 @@ const Swap = () => {
           {isConnected && (
             <ActionButton
               variant="primary"
-              disabled={swapDisabled}
+              disabled={isActionDisabled}
               onClick={handleSwapClick}
-              loading={balancesPending || previewLoading || txCostPending}
+              loading={isActionLoading}
             >
               {swapButtonTitle}
             </ActionButton>
